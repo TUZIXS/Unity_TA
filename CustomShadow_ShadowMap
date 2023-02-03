@@ -1,0 +1,93 @@
+Shader "Custom/ShadowMap"  // 计算阴影
+{
+    SubShader
+    {
+        Pass
+        {
+            NAME "DirectionalShadow"
+
+            Blend DstColor Zero
+            CGPROGRAM
+            #pragma vertex vert
+            #pragma fragment frag
+
+            #include "UnityCG.cginc"
+
+            struct appdata
+            {
+                float4 vertex : POSITION;
+                float3 normal : NORMAL;
+            };
+
+            struct v2f
+            {
+                float4 shadowCoord : TEXCOORD0;
+                float4 worldPos : TEXCOORD1;
+                float3 worldNormal : TEXCOORD2;
+                float4 pos : SV_POSITION;
+            };
+
+            sampler2D _CustomShadowMap;
+            float4 _CustomShadowMap_TexelSize;
+            float4x4 _CustomLightSpaceMatrix;
+
+            float _CustomShadowStrength;
+            int _CustomShadowSoftness;
+
+            float _pcfSoftShadow(float depth, float2 uv, float bias)
+            {
+                float shadow = 0;
+                for (int x = -_CustomShadowSoftness; x <= _CustomShadowSoftness; x++)
+                {
+                    for (int y = -_CustomShadowSoftness; y <= _CustomShadowSoftness; y++)
+                    {
+                        float2 _uv = uv + float2(x, y) * _CustomShadowMap_TexelSize.xy;
+                        float4 col = tex2D(_CustomShadowMap, _uv);
+                        float samplerDepth = DecodeFloatRGBA(col);
+                        shadow += samplerDepth + bias < depth ? (1 - _CustomShadowStrength) : 1;
+                    }
+                }
+                return shadow / ((_CustomShadowSoftness * 2 + 1) * (_CustomShadowSoftness * 2 + 1));
+            }
+
+            v2f vert (appdata v)
+            {
+                v2f o;
+                o.pos = UnityObjectToClipPos(v.vertex);
+                float4 worldPos = mul(unity_ObjectToWorld, v.vertex);
+                o.shadowCoord = mul(_CustomLightSpaceMatrix, worldPos);
+                o.worldNormal = UnityObjectToWorldNormal(v.normal);
+                o.worldPos = worldPos;
+                return o;
+            }
+
+            fixed4 frag (v2f i) : SV_Target
+            {
+                float2 uv = i.shadowCoord.xy / i.shadowCoord.w;
+                uv = uv * 0.5 + 0.5;
+
+                float4 col = tex2D(_CustomShadowMap, uv);
+                float samplerDepth = DecodeFloatRGBA(col);
+
+                float depth = i.shadowCoord.z / i.shadowCoord.w;
+                #if defined (SHADER_TARGET_GLSL)
+                    depth = depth * 0.5 + 0.5;
+                #elif defined (UNITY_REVERSED_Z)
+                    depth = 1 - depth;
+                #endif
+
+                float3 lightDir = normalize(UnityWorldSpaceLightDir(i.worldPos));
+                float ndotl = dot(normalize(i.worldNormal), lightDir);
+                float bias = max(0.05 * (1.0 - ndotl), 0.005);
+                float shadow = samplerDepth + bias < depth ? (1 - _CustomShadowStrength) : 1;
+                shadow = _pcfSoftShadow(depth, uv, bias);
+                
+                if (uv.x > 1 || uv.y > 1 || uv.x < 0 || uv.y < 0)
+                    shadow = 1;
+
+                return shadow;
+            }
+            ENDCG
+        }
+    }
+}
