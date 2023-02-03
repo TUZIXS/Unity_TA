@@ -1,0 +1,286 @@
+Shader "Custom/Grass"
+{
+    Properties
+    {
+        [Header(Shape)]
+        _Height ("Height", Range(0, 0.5)) = 0.1  // 高度
+        _HeightRandom ("Height Random", Range(0, 0.5)) = 0.1  // 高度随机程度
+
+        _Width ("Width", Range(0, 0.1)) = 0.05  // 宽度
+        _WidthRandom ("Width Random", Range(0, 0.1)) = 0.05  // 宽度随机程度
+
+        _Forward ("Foarward", Range(0, 1)) = 0.5  // 弯曲
+        _ForwardRandom ("Forward Random", Range(0, 0.5))  = 0.2  // 弯曲随机程度
+        _Curl ("Curl", Range(0, 5)) = 2.5  // 弯曲程度
+
+        _RotationRandom ("Rotation Random", Range(0, 1)) = 0.5  // 旋转随机程度
+        _BendRandom ("Bend Random", Range(0, 1)) = 0.2  // 倾斜随机程度
+
+        [Header(Shading)]
+        _TopColor ("Top Color", Color) = (1, 1, 1, 1)  // 顶部颜色
+        _BottomColor ("Bottom Color", Color) = (1, 1, 1, 1)  // 底部颜色
+
+        _ColorVariation ("Color Variation", Color) = (1, 1, 1, 1)  // 杂色
+        _ColorVariationStep ("Color Variation Step", Range(0, 0.1)) = 0.05  // 杂色数量
+
+        _TranslucentGain ("Translucent Gain", Range(0, 2)) = 1  // 半透明
+        _SpecularGloss ("Specular Gloss", Float) = 10  // 高光范围
+        _SpecularPower ("Specular Power", Float) = 10  // 高光强度
+        
+        [Header(Wind)]
+        _WindMap ("Wind Map", 2D) = "white"{}  // 风贴图
+        _WindSpeed ("Wind Speed", Float) = 1  // 风速
+        _WindStrength ("Wind Strength", Float) = 1  // 风强度
+
+        [Header(Interaction)]
+        _Radius ("Redius", Float) = 1  // 影响半径
+    }
+
+    CGINCLUDE
+    #include "UnityCG.cginc"
+    #include "AutoLight.cginc"  // 计算光照所需头文件
+    #include "Lighting.cginc"  // 计算光照所需头文件
+    #pragma multi_compile_fwdbase  // 阴影
+    #define GRASS_SEGMENTS 3  // 定义段数
+
+    struct appdata
+    {
+        float4 vertex : POSITION;
+        float3 normal : NORMAL;
+        float4 tangent : TANGENT;
+        float2 uv : TEXCOORD0;
+    };
+
+    // 顶点着色器 to 几何着色器
+    struct v2g
+    {
+        float2 uv : TEXCOORD0;
+        float3 normal : NORMAL;
+        float4 tangent : TANGENT;
+        float4 vertex : SV_POSITION;
+    };
+
+    // 几何着色器 to 片元着色器
+    struct g2f
+    {
+        float4 pos : SV_POSITION;
+        float3 worldNormal : NORMAL;
+        float2 uv : TEXCOORD0;
+        float3 worldView : TEXCOORD1;
+        float variation : TEXCOORD2;
+        unityShadowCoord4 _ShadowCoord : TEXCOORD3;  // 添加阴影
+    };
+
+    // Shape
+    float _Height;
+    float _HeightRandom;
+
+    float _Width;
+    float _WidthRandom;
+
+    float _Forward;
+    float _ForwardRandom;
+    float _Curl;
+
+    float _RotationRandom;
+    float _BendRandom;
+
+    // Shading
+    float4 _TopColor;
+    float4 _BottomColor;
+
+    float4 _ColorVariation;
+    float _ColorVariationStep;
+
+    float _TranslucentGain;
+    float _SpecularGloss;
+    float _SpecularPower;
+
+    // Wind
+    sampler2D _WindMap;
+    float4 _WindMap_ST;
+    float _WindSpeed;
+    float _WindStrength;
+
+    // Interaction
+    float4 _Position;  // 碰撞体位置
+    float _Radius;
+
+    // 顶点着色器：
+    v2g vert (appdata v)
+    {
+        v2g o;
+        o.vertex = v.vertex;
+        o.normal = v.normal;
+        o.tangent = v.tangent;
+        o.uv = v.uv;
+        return o;
+    }
+
+    // angle: 弧度制的角度
+    // axis: 旋转所绕的轴
+    // 类似 C# Quaternion.AngleAxis
+    float3x3 _angleAxis3x3(float angle, float3 axis)
+	{
+		float c, s;
+		sincos(angle, s, c);
+
+		float t = 1 - c;
+		float x = axis.x;
+		float y = axis.y;
+		float z = axis.z;
+
+		return float3x3(
+			t * x * x + c, t * x * y - s * z, t * x * z + s * y,
+			t * x * y + s * z, t * y * y + c, t * y * z - s * x,
+			t * x * z - s * y, t * y * z + s * x, t * z * z + c
+			);
+	}
+
+    // 随机值
+    float _randomValue(float3 pos)
+    {
+        return frac(sin(dot(pos, float3(12.9898, 78.233, 52.4215))) * 43758.5453);
+    }
+
+    // 输出顶点
+    g2f _vertexOutput(float3 origPos, float3 pos, float3 normal, float2 uv, float3x3 mat)  // （原位置，顶点位置，法线方向，uv，变换矩阵）
+    {
+        g2f o;
+
+        float3 p = mul(mat, pos);
+        o.pos = UnityObjectToClipPos(origPos + float4(p, 1));
+        o.worldNormal = mul(mat, normal);
+        o.uv = uv;
+        float3 worldPos = mul(unity_ObjectToWorld, pos).xyz;
+        o.worldView = _WorldSpaceLightPos0 - worldPos;
+        o.variation = _randomValue(origPos);
+        o.pos = UnityApplyLinearShadowBias(o.pos);  // 解决自阴影的 shadow acne（阴影失真）问题
+        o._ShadowCoord = ComputeScreenPos(o.pos);  // 屏幕空间阴影
+
+        return o;
+    }
+
+    // 几何着色器：
+    [maxvertexcount(GRASS_SEGMENTS * 2 + 1)]  // 定义几何着色器中输出顶点的最大数量
+    void geo(triangle v2g IN[3], inout TriangleStream<g2f> triStream)
+    {
+        g2f o;
+
+        // 在每个顶点位置绘制一个三角形
+        float3 pos = IN[0].vertex;
+
+        // 定义每个草的模型的切线空间
+        float3 normal = IN[0].normal;
+        float4 tangent = IN[0].tangent;
+        // tangent.w：副切线的方向
+        // OpenGL：tangent.w = -1。DX：tangent.w = 1。
+        float3 bitangent = cross(normal, tangent) * tangent.w;
+        // 切线空间 -> 世界空间
+        float3x3 tangent2World = float3x3(tangent.x, bitangent.x, normal.x,
+                                          tangent.y, bitangent.y, normal.y,
+                                          tangent.z, bitangent.z, normal.z);
+        
+        // 随机朝向
+        float3x3 facingRotationMat = _angleAxis3x3(_randomValue(pos) * 2 * UNITY_PI * _RotationRandom, float3(0, 0, 1));
+        float3x3 facingMat = mul(tangent2World, facingRotationMat);
+
+        // 随机倾斜
+        float3x3 bendRotationMat = _angleAxis3x3(_randomValue(pos.zxy) * 0.5 * UNITY_PI * _BendRandom, float3(1, 0, 0));
+        float3x3 mat = mul(facingMat, bendRotationMat);
+
+        // 添加动画
+        float2 windUV = pos.xz * (_WindMap_ST.xy) + _WindMap_ST.zw + _Time.x * _WindSpeed;
+        float2 windSample = tex2Dlod(_WindMap, float4(windUV, 0, 0)).rg * _WindStrength;  // 在几何着色器中使用 tex2Dlod 采集贴图，而不是 tex2D
+        float3 wind = normalize(float3(windSample.x, windSample.y, 0));
+        float3x3 windRotationMat = _angleAxis3x3(windSample.x * UNITY_PI, wind);
+        mat = mul(mat, windRotationMat);
+
+        // 随机形状
+        float height = _Height + _randomValue(pos.xzy) * _HeightRandom;  // 随机高度
+        float width = _Width + _randomValue(pos.yxz) * _WidthRandom;  // 随机宽度
+        float forward = _Forward + _randomValue(pos.yzx) * _ForwardRandom;  // 随机弯曲
+
+        // 添加交互
+        float3 worldPos = mul(unity_ObjectToWorld, pos).xyz;
+        float dis = distance(_Position, worldPos);
+        float radius = 1 - saturate(dis / _Radius);
+        height = max(height - radius, 0.3);
+        forward = forward - radius * 3;
+
+        // 增加草模型的细分，顶点位置
+        for (int i = 0; i < GRASS_SEGMENTS; i++)
+        {
+            float t = i / (float)GRASS_SEGMENTS;
+            float h = height * t;
+            float w = i == 0 ? width / 1.5 : width * (1 - t);
+            float f = pow(t, _Curl) * forward;
+
+            float3x3 _mat = i == 0 ? facingMat : mat;  // 底层两个顶点不添加动画
+            triStream.Append(_vertexOutput(pos, float3(w, f, h), float3(0, -1, f), float2(0, t), _mat));
+            triStream.Append(_vertexOutput(pos, float3(-w, f, h), float3(0, -1, f), float2(1, t), _mat));
+        }
+        triStream.Append(_vertexOutput(pos, float3(0, forward,  height), float3(0, -1, forward), float2(0.5, 1), mat));
+    }
+
+    // 片元着色器：
+    float4 frag (g2f i, float facing : VFACE) : SV_Target
+    {
+        // 高光
+        float3 worldNormal = facing > 0 ? i.worldNormal : -i.worldNormal;  // 统一朝向
+        float3 worldLight = normalize(_WorldSpaceLightPos0);
+        float3 worldView = normalize(i.worldView);
+        float3 h = normalize(worldLight + worldView);
+        float specular = pow(saturate(dot(h, worldNormal)), _SpecularGloss) * _SpecularPower;
+
+        // 明暗
+        float nl = saturate(dot(worldNormal, _WorldSpaceLightPos0) + _TranslucentGain);
+        float4 lightColor = nl * _LightColor0 + specular;
+
+        // 阴影
+        float shadow = saturate(SHADOW_ATTENUATION(i) + 0.2);
+        lightColor *= shadow;
+
+        // 颜色
+        float4 col = lerp(_BottomColor, _TopColor, i.uv.y);
+        col *= lightColor;
+
+        // 杂色
+        col = lerp(col, _ColorVariation * lightColor, step(i.variation, _ColorVariationStep));
+
+        return col;
+    }
+    ENDCG
+
+    SubShader
+    {
+        Cull Off  // 双面显示
+
+        Pass
+        {
+            Tags { "RenderType"="Opaque" }
+
+            CGPROGRAM
+            #pragma vertex vert
+            #pragma geometry geo  // 几何
+            #pragma fragment frag
+            ENDCG
+        }
+
+        // 添加阴影
+        Pass
+        {
+            Tags { "LightMode"="ShadowCaster" }
+            CGPROGRAM
+            #pragma vertex vert
+            #pragma geometry geo  // 几何
+            #pragma fragment _frag
+
+            float4 _frag (g2f i) : SV_Target
+            {
+                SHADOW_CASTER_FRAGMENT(i);
+            }
+            ENDCG
+        }
+    }
+}
