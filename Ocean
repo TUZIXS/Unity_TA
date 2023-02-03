@@ -1,0 +1,441 @@
+Shader "Custom/Ocean"
+{
+    Properties
+    {
+        [Header(Base Color)]
+        _ShallowColor ("Shallow Color", Color) = (0.44, 0.95, 0.36, 1.0)  // 浅处颜色
+        _DeepColor ("Deep Color", Color) = (0.0, 0.05, 0.17, 1.0)  // 深处颜色
+        _FarColor ("Far Color", Color) = (0.0, 0.0, 0.0, 1.0)  // 远处颜色
+
+        [Header(Densities)]
+        _DepthDensity ("Depth Density", Range(0, 1)) = 0.5  // 可见深度
+        _DistanceDensity ("Distance Density", Range(0, 0.01)) = 0.0018  // 可见距离
+
+        [Header(Reflection)]
+        _ReflectedIntensity ("Reflected Intensity", Range(0, 1)) = 0.5  // 反射强度
+
+        [Header(Waves)]
+        _WaveNormalMap ("Wave Normal Map", 2D) = "bump"{}  // 波浪法线贴图
+        _WaveNormalSpeed ("Wave Normal Speed", float) = 0.05  // 法线贴图移动速度
+        _WaveNormalScale ("Wave Normal Scale", float) = 20  // 法线贴图缩放
+
+        _Wave0Direction ("Wave0 Direction", Range(0, 0.5)) = 0.25  // 波浪0方向
+        _Wave0Amplitude ("Wave0 Amplitude", float) = 0.25  // 波浪0振幅
+        _Wave0Length ("Wave0 Length", float) = 10  // 波浪0波长
+        _Wave0Speed ("Wave0 Speed", float) = 0.25  // 波浪0速度
+
+        _Wave1Direction ("Wave1 Direction", Range(0.5, 1)) = 0.75  // 波浪1方向
+        _Wave1Amplitude ("Wave1 Amplitude", float) = 0.15  // 波浪1振幅
+        _Wave1Length ("Wave1 Length", float) = 10  // 波浪1波长
+        _Wave1Speed ("Wave1 Speed", float) = 0.75  // 波浪1速度
+
+        [Header(Edge Foam)]
+        _EdgeFoamColor ("Edge Foam Color", Color) = (1, 1, 1, 1)  // 边缘的泡沫颜色
+        _EdgeFoamDepth ("Edge Foam Depth", Range(0, 1)) = 0.25  // 边缘的泡沫深度
+
+        [Header(Sparkle)]
+        _SparkleNormalMap ("Sparkle Normal Map", 2D) = "bump"{}  // 海面波光贴图
+        _SparkleScale ("Sparkle Scale", float) = 75  // 海面波光缩放
+        _SparkleSpeed ("Sparkle Speed", float) = 0.025  // 海面波光移动速度
+        _SparkleColor ("Sparkle Color", Color) = (1, 1, 1, 1)  // 海面波光颜色
+        _SparkleExponent ("Sparkle Exponent", float) = 3  // 海面波光范围
+        _SparkleAmplitude ("Sparkle Amplitude", float) = 5  // 海面波光强度
+
+        [Header(Sun specular)]
+        _SpecularColor ("Specular Color", Color) = (1, 1, 1, 1)  // 高光颜色
+        _SpecularPower ("Specular Power", float) = 10  // 高光强度
+        _SpecularAmplitude ("Specular Amplitude", float) = 1  // 高光范围
+
+        [Header(SSS)]
+        _SSSColor ("SSS Color", Color) = (1, 1, 1, 1)  //  SSS 颜色
+
+        [Header(Foam)]
+        _FoamTexture ("Foam Texture", 2D) = "black"{}  // 海面泡沫贴图
+        _FoamNoiseScale ("Foam Noise Scale", float) = 0.5  // 泡沫贴图缩放
+        _FoamScale ("Foam Scale", float) = 1  // 泡沫尺寸
+        _FoamSpeed ("Foam Speed", float) = 0.1  // 泡沫移动速度
+        _FoamAmplitude ("Foam Amplitude", float) = 1  // 泡沫范围
+
+        [Header(Shadow Map)]
+        _MaxShadowMapDistance ("Max Shadow Map Distance", float) = 50  // 阴影贴图最大距离
+    }
+    SubShader
+    {
+        Tags { "RenderType"="Opaque" }
+        LOD 100
+
+        Tags    // Rendering Order - Queue tag 只能写在这里
+        {
+            "Queue" = "Transparent"
+            "RenderType" = "Transparent"
+        }
+
+        // 抓取图 _GrabTexture 所需的 Pass
+        GrabPass
+        {
+            "_GrabTexture"
+        }
+
+        Pass
+        {
+            Tags { "LightMode"="Always" }
+            CGPROGRAM
+            #pragma vertex vert
+            #pragma fragment frag
+            // make fog work
+            #pragma multi_compile_fog
+
+            #include "UnityCG.cginc"
+            #define PI 3.1415926
+
+            struct appdata
+            {
+                float4 vertex : POSITION;
+                float2 uv : TEXCOORD0;
+            };
+
+            struct v2f
+            {
+                float2 uv : TEXCOORD0;
+                float4 grabPos : TEXCOORD1;  // 抓取图顶点坐标
+                float3 worldPos : TEXCOORD2;  // 世界空间顶点坐标
+                UNITY_FOG_COORDS(3)
+                float4 pos : SV_POSITION;
+            };
+
+            sampler2D _CameraDepthTexture;  // 声明深度图（基于屏幕坐标）
+            sampler2D _GrabTexture;  // 声明抓取图（海平面向下）
+            //sampler2D _DirectionalShadowMap;  // 声明通过 C# 获取的 ShadowMap
+
+            // Base Color
+            float4 _ShallowColor;
+            float4 _DeepColor;
+            float4 _FarColor;
+            float _DepthDensity;
+            float _DistanceDensity;
+            
+            // Reflection
+            float _ReflectedIntensity;
+
+            // Waves
+            sampler2D _WaveNormalMap;
+            float _WaveNormalSpeed;
+            float _WaveNormalScale;
+
+            float _Wave0Direction;
+            float _Wave0Amplitude;
+            float _Wave0Length;
+            float _Wave0Speed;
+
+            float _Wave1Direction;
+            float _Wave1Amplitude;
+            float _Wave1Length;
+            float _Wave1Speed;
+
+            // Edge Foam
+            float4 _EdgeFoamColor;
+            float _EdgeFoamDepth;
+
+            // Sparkle
+            sampler2D _SparkleNormalMap;
+            float _SparkleScale;
+            float _SparkleSpeed;
+            float3 _SparkleColor;
+            float _SparkleExponent;
+            float _SparkleAmplitude;
+
+            // Sun Specular
+            float3 _SpecularColor;
+            float _SpecularPower;
+            float _SpecularAmplitude;
+
+            // SSS
+            float3 _SSSColor;
+
+            // Foam
+            sampler2D _FoamTexture;
+            float _FoamNoiseScale;
+            float _FoamScale;
+            float _FoamSpeed;
+            float _FoamAmplitude;
+
+            // Shadow Map
+            float _MaxShadowMapDistance;
+
+            // 波浪（《GPU精粹 1》P5）
+            float _wave(float2 position, float2 direction, float waveLength, float amplitude, float speed)
+            {
+                float d = PI * dot(position, direction) / waveLength;
+                float phase = _Time.y * speed;
+                float wave = amplitude * sin(d + phase);
+
+                return wave;
+            }
+
+            // 计算波高
+            float _calculateWaveHeight(float2 position)  // （位置）
+            {
+                float2 dir0 = float2(cos(PI * _Wave0Direction), sin(PI * _Wave0Direction));  // 波浪0方向
+                float wave0 = _wave(position, dir0, _Wave0Length, _Wave0Amplitude, _Wave0Speed);
+
+                float2 dir1 = float2(cos(PI * _Wave1Direction), sin(PI * _Wave1Direction));  // 波浪1方向
+                float wave1 = _wave(position, dir1, _Wave1Length, _Wave1Amplitude, _Wave1Speed);
+
+                return wave0 + wave1;
+            }
+
+            v2f vert (appdata v)
+            {
+                v2f o;
+                o.uv = v.uv;
+                o.worldPos = mul(unity_ObjectToWorld, v.vertex).xyz;  // 世界空间顶点坐标
+                o.worldPos.y += _calculateWaveHeight(o.worldPos.xz);  // 顶点动画
+
+                o.pos = mul(UNITY_MATRIX_VP, float4(o.worldPos, 1));  // 世界空间 -> 裁剪空间
+                // 当把当前屏幕内容截屏并保存在一个目标纹理时，有时要求知道在裁剪空间中的某一点将会对应保存在目标纹理中的哪一点。
+                // ComputeGrabScreenPos：传递进裁剪空间某点的齐次坐标，返回该点在目标纹理中的纹理贴图坐标。
+                o.grabPos = ComputeGrabScreenPos(o.pos);  // 裁剪空间 -> 抓取图
+
+                UNITY_TRANSFER_FOG(o,o.pos);
+                return o;
+            }
+            
+            // 折射颜色
+            float3 _refractedColor(v2f i, out float2 screenCoord)
+            {
+                screenCoord = i.grabPos.xy / i.grabPos.w;  // 转换为屏幕坐标
+                float3 color = tex2D(_GrabTexture, screenCoord).rgb * _ShallowColor;  // 抓取图（海平面向下）
+                
+                return color;
+            }
+
+            // 固有色
+            float3 _baseColor(v2f i, float3 refractedColor, float2 screenCoord, float shadowMask, out float biasDepth, out float distanceMask)
+            {
+                float depth = tex2D(_CameraDepthTexture, screenCoord).r;  // 深度（距离水面）
+                biasDepth = abs(LinearEyeDepth(depth) - LinearEyeDepth(i.pos.z));  // LinearEyeDepth：把深度纹理的采样结果转换到视角空间下的深度值
+                float transmittance = exp(-biasDepth * _DepthDensity);  // 透明度。exp(x) = e^x。
+                float3 color = lerp(_DeepColor, refractedColor, transmittance);
+
+                float dist = length(i.worldPos - _WorldSpaceCameraPos.xyz);  // 顶点距离摄像机的距离
+                distanceMask = exp(-_DistanceDensity * dist);  // 可见距离遮罩
+                color = lerp(_FarColor, color, distanceMask);
+                color *= max(shadowMask, 0.5);
+
+                return color;
+            }
+            
+            // TBN 旋转矩阵
+            float3x3 _tbn(float2 worldPos, float d)  // （顶点坐标，lim d -> 0）
+            {
+                // tangent，bitangent 在平面的简易算法
+                //float3 tangent = float3(0, 0, 1);  // 切线方向
+                //float3 bitangent = float3(1, 0, 0);  // 副切线方向
+                //float3 normal = normalize(cross(bitangent, tangent));  // 法线方向
+
+                // 斜率 -> 切线方向
+                // 当 lim d -> 0 时，斜率 = Δy / Δx = [f(Pos) - f(Pos - d)] / (Pos - d)
+                float waveHeight = _calculateWaveHeight(worldPos);  // 顶点高度
+                float waveHeightDX = _calculateWaveHeight(worldPos - float2(d, 0));  // Δx
+                float waveHeightDZ = _calculateWaveHeight(worldPos - float2(0, d));  // Δz
+
+                float3 tangent = normalize(float3(0, waveHeight - waveHeightDX, d));  // 切线方向
+                float3 bitangent = normalize(float3(d, waveHeight - waveHeightDZ, 0));  // 副切线方向
+                float3 normal = normalize(cross(bitangent, tangent));  // 法线方向
+
+                return float3x3(tangent, bitangent, normal);
+            }
+
+            // 计算变化的 uv
+            float2 _panner(float2 uv, float2 direction, float speed)
+            {
+                return uv + normalize(direction) * _Time.y * speed;
+            }
+
+            // 随顶点动画变化的法线贴图（法线扰动）
+            float3 _motion4Ways(sampler2D tex, float2 uv, float2 offset[4], float4 scale, float speed, int texType)  // （原始法线贴图，uv，偏移，缩放，速度，贴图类型）
+            {
+                // 四张不同方向变化的 uv
+                float2 uv0 = _panner((uv + offset[0]) * scale.x, float2(1, 1), speed);
+                float2 uv1 = _panner((uv + offset[1]) * scale.y, float2(1, -1), speed);
+                float2 uv2 = _panner((uv + offset[2]) * scale.z, float2(-1, -1), speed);
+                float2 uv3 = _panner((uv + offset[3]) * scale.w, float2(-1, 1), speed);
+
+                // 采集原始法线贴图
+                if (texType >= 0)
+                {
+                    float3 sample0 = UnpackNormal(tex2D(tex, uv0)).rgb;
+                    float3 sample1 = UnpackNormal(tex2D(tex, uv1)).rgb;
+                    float3 sample2 = UnpackNormal(tex2D(tex, uv2)).rgb;
+                    float3 sample3 = UnpackNormal(tex2D(tex, uv3)).rgb;
+
+                    if (texType == 0)
+                        return normalize(sample0 + sample1 + sample2 + sample3);
+                    else
+                    {
+                        float3 normal0 = float3(sample0.x, sample1.y, 1);
+                        float3 normal1 = float3(sample2.x, sample3.y, 1);
+
+                        return normalize(float3((normal0 + normal1).xy, (normal0 * normal1).z));
+                    }
+                }
+                else
+                {
+                    float3 sample0 = tex2D(tex, uv0).rgb;
+                    float3 sample1 = tex2D(tex, uv1).rgb;
+                    float3 sample2 = tex2D(tex, uv2).rgb;
+                    float3 sample3 = tex2D(tex, uv3).rgb;
+
+                    return (sample0 + sample1 + sample2 + sample3) / 4.0;
+                }
+                
+            }
+
+            // 反射颜色
+            float3 _reflectedColor(v2f i, float shadowMask, float distanceMask, out float3 normalTS, out float3 viewDirWS, out float3 viewReflection)
+            {
+                // 偏移四个法线贴图
+                float2 offset[4] = {float2(0, 0),
+                                    float2(0.418, 0.355),
+                                    float2(0.865, 0.148),
+                                    float2(0.651, 0.752)};
+
+                normalTS = _motion4Ways(_WaveNormalMap, i.worldPos.xz / _WaveNormalScale, offset, float4(1, 1, 1, 1), _WaveNormalSpeed, 0);  // 使用顶点采集法线贴图
+                float3x3 tbn = _tbn(i.worldPos.xz, 0.01);
+                
+                float3 normalWS = mul(normalTS, tbn);  // 切线空间 -> 世界空间
+                viewDirWS = normalize(i.worldPos - _WorldSpaceCameraPos);  // 视线方向
+                float fresnelMask = pow(1 + dot(normalWS, -viewDirWS), 5) * _ReflectedIntensity;  // 菲涅耳
+
+                viewReflection = reflect(viewDirWS, normalWS);  // 反射方向
+                float3 color = UNITY_SAMPLE_TEXCUBE(unity_SpecCube0, viewReflection);  // 采集天空球
+                color *= fresnelMask;
+                color *= shadowMask;  // 弱化阴影处
+                color *= distanceMask;  // 弱化远处
+
+                return color;
+            }
+
+            // 边缘的泡沫
+            float3 _edgeFoamColor(float biasDepth, float shadowMask)
+            {
+                float edgeFoamMask = exp(-biasDepth / _EdgeFoamDepth);
+                edgeFoamMask = round(edgeFoamMask);  // 卡通
+                float3 color =  lerp(0, _EdgeFoamColor, edgeFoamMask);
+                color *= lerp(UNITY_LIGHTMODEL_AMBIENT.xyz, 1, shadowMask);
+
+                return color;
+            }
+
+            // 海面波光
+            float3 _sparkleColor(v2f i, float shadowMask, float distanceMask)
+            {
+                float2 offset[4] = {float2(0, 0), float2(0, 0), float2(0, 0), float2(0, 0)};
+                float3 sparkle0 = _motion4Ways(_SparkleNormalMap, i.worldPos.xz / _SparkleScale, offset, float4(1, 2, 3, 4), _SparkleSpeed, 1);
+                float3 sparkle1 = _motion4Ways(_SparkleNormalMap, i.worldPos.xz / _SparkleScale, offset, float4(1, 0.5, 2, 1.5), _SparkleSpeed, 1);
+                
+                float sparkleMask = dot(sparkle0, sparkle1) * saturate(_SparkleAmplitude * sqrt(saturate(dot(sparkle0.x, sparkle1.x))));
+                sparkleMask = pow(sparkleMask, _SparkleExponent);
+                sparkleMask = ceil(sparkleMask);  // 卡通
+
+                float3 color = lerp(0, _SparkleColor, sparkleMask);
+                color *= max(shadowMask, 0.1);  // 弱化阴影内
+                color *= distanceMask;  // 弱化远处
+
+                return color;
+            }
+
+            // 高光
+            float3 _specularColor(float3 viewReflection, float shadowMask)
+            {
+                float mask = saturate(dot(viewReflection, _WorldSpaceLightPos0));  // 范围
+                mask = pow(mask, _SpecularPower);
+                mask = round(mask);  // 卡通
+                mask *= _SpecularAmplitude;
+
+                float3 color = lerp(0, _SpecularColor, mask);
+                color *= shadowMask;
+
+                return color;
+            }
+
+            // SSS
+            float3 _sssColor(v2f i, float3 viewDirWS)
+            {
+                float mask = saturate(dot(viewDirWS, _WorldSpaceLightPos0));  // 范围
+                float waveHeight = saturate(_calculateWaveHeight(i.worldPos.xz));  // 高海浪范围
+
+                float3 color = _SSSColor * mask * waveHeight;
+                return color;
+            }
+
+            // 海面的泡沫
+            float3 _foamColor(v2f i, float3 normalTS, float shadowMask, float distanceMask)
+            {
+                float2 uv = i.worldPos.xz / _FoamScale + _FoamNoiseScale * normalTS.xz;
+                float2 offset[4] = {float2(0, 0),
+                                    float2(0.418, 0.355),
+                                    float2(0.865, 0.148),
+                                    float2(0.651, 0.752)};
+                
+                float3 color = _motion4Ways(_FoamTexture, uv, offset, float4(1, 1, 1, 1), _FoamSpeed, -1);
+                color *= _FoamAmplitude;
+                color *= max(shadowMask, 0.2);  // 弱化阴影内
+                color *= distanceMask;  // 弱化远处
+
+                return color;
+            }
+
+            // 阴影相关
+            float _shadowMap(float3 worldPos)
+            {
+                float dist = length(worldPos - _WorldSpaceCameraPos.xyz);  // 顶点距离摄像机的距离
+                if (dist > _MaxShadowMapDistance)
+                    return 1;
+
+                float4 near = float4(dist >= _LightSplitsNear);  // 根据距离设置阴影权重
+                float4 far = float4(dist < _LightSplitsFar);
+                float4 weights = near * far;
+
+                float4 sc0 = mul(unity_WorldToShadow[0], float4(worldPos, 1)) * weights.x;  // 世界空间 -> 阴影空间
+                float4 sc1 = mul(unity_WorldToShadow[1], float4(worldPos, 1)) * weights.y;
+                float4 sc2 = mul(unity_WorldToShadow[2], float4(worldPos, 1)) * weights.z;
+                float4 sc3 = mul(unity_WorldToShadow[3], float4(worldPos, 1)) * weights.w;
+
+                float4 shadowCoord = sc0 + sc1 + sc2 + sc3;
+
+                //return tex2Dproj(_DirectionalShadowMap, shadowCoord) < shadowCoord.z / shadowCoord.w;  // 采集阴影贴图，判断顶点是否在阴影内
+                return shadowCoord;
+            }
+
+            fixed4 frag (v2f i) : SV_Target
+            {
+                float shadowMask = _shadowMap(i.worldPos);
+
+                float2 screenCoord;
+                float3 refractedColor = _refractedColor(i, screenCoord);  // 折射
+
+                float biasDepth;
+                float distanceMask;
+                float3 baseColor = _baseColor(i, refractedColor, screenCoord, shadowMask, biasDepth, distanceMask);  // 固有色
+
+                float3 normalTS;
+                float3 viewDirWS;
+                float3 viewReflection;
+                float3 reflectedColor = _reflectedColor(i, shadowMask, distanceMask, normalTS, viewDirWS, viewReflection);  // 反射
+                float3 edgeFoamColor = _edgeFoamColor(biasDepth, shadowMask);  // 边缘泡沫
+                float3 sparkleColor = _sparkleColor(i, shadowMask, distanceMask);  // 水面波光
+                float3 specularColor = _specularColor(viewReflection, shadowMask);  // 高光
+                float3 sssColor = _sssColor(i, viewDirWS);  // SSS
+                float3 foamColor = _foamColor(i, normalTS, shadowMask, distanceMask);  // 涟漪
+                
+                float3 finalColor = baseColor + reflectedColor + edgeFoamColor + sparkleColor + specularColor + sssColor + foamColor;
+                
+                // apply fog
+                UNITY_APPLY_FOG(i.fogCoord, finalColor);
+                return float4(finalColor, 1);
+            }
+            ENDCG
+        }
+    }
+}
