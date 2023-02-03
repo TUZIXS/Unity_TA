@@ -1,0 +1,188 @@
+Shader "Custom/Chapter31_Raindrop"
+{
+    Properties
+    {
+        _MainTex ("Texture", 2D) = "white" {}
+        _RainMount ("RainMount", Float) = 1.0
+        _Speed ("Speed", Float) = 1.0
+    }
+    SubShader
+    {
+        Tags { "RenderType"="Opaque" }
+        LOD 100
+
+        Pass
+        {
+            CGPROGRAM
+            #pragma vertex vert
+            #pragma fragment frag
+
+            #include "UnityCG.cginc"
+
+            struct appdata
+            {
+                float4 vertex : POSITION;
+                float2 uv : TEXCOORD0;
+            };
+
+            struct v2f
+            {
+                float2 uv : TEXCOORD0;
+                float4 vertex : SV_POSITION;
+            };
+
+            sampler2D _MainTex;
+            float4 _MainTex_ST;
+            float _RainMount;
+            float _Speed;
+
+            v2f vert (appdata v)
+            {
+                v2f o;
+                o.vertex = UnityObjectToClipPos(v.vertex);
+                o.uv = v.uv;
+                return o;
+            }
+
+            // 淡入淡出（0 -> 1 -> 0）
+            float pingPong(float v, float t)
+            {
+                return smoothstep(0, v, t) * smoothstep(1, v, t);
+            }
+
+            // 噪点网格（x、y、z 共三种）
+            float3 noiseGrid(float2 uv)
+            {
+                float pt = uv.x * 0.12345 + uv.y * 0.54321;
+                float3 pt3 = frac(float3(pt * 0.98765, pt * 0.87654, pt * 0.76543));  // 随机后取小数部分
+                pt3 += dot(pt3, pt3.yzx);
+                pt3 = frac(float3((pt3.x + pt3.y) * pt3.z, (pt3.y + pt3.z) * pt3.x, (pt3.z + pt3.x) * pt3.y));  // 再次随机后取小数部分
+
+                return pt3;
+            }
+
+            // 随机数值
+            float noise(float n)
+            {
+                return frac(sin(n * 123456.789) * 987654.321);
+            }
+
+            // 静态水滴（灰度值）
+            float staticDrops(float2 uv, float t)
+            {
+                uv *= 40;  // 细分 uv
+
+                float2 id = floor(uv);  // 拿到整数值（0，1，2，3，……）
+
+                float3 n3 = noiseGrid(id);  // 获得随机值
+
+                uv = frac(uv) - 0.5;  // 生成横竖条纹
+                float2 p = (n3.xy - 0.5) * 0.7;  // 偏移，减少裁剪
+                float radius = length(uv - p);  // 使用 uv 减去随机值生成圆形
+
+                float fade = pingPong(0.025, frac(t + n3.z));  // 使每个网格灰度值进行周期性循环
+                float c = smoothstep(0.3, 0, radius) * frac(n3.z * 10) * fade;  // 将圆形转换为圆点，将圆点灰度进行随机变化
+
+                return c;
+            }
+
+            // 动态水滴
+            float2 dynamicDrops(float2 uv, float t)
+            {
+                float2 origUV = uv;  // 储存原始 uv
+                uv.y += t;  // uv.y 随时间偏移
+
+                float2 scale = float2(6, 1);  // 竖条纹长宽比
+                float2 scale2 = scale * 2;
+
+                float2 id = floor(uv * scale2);  // 拿到整数值
+
+                uv.y += noise(id.x);  // uv.y 随机
+
+                id = floor(uv * scale2);  // 拿到整数值
+                float3 n3 = noiseGrid(id);  // 获得随机值
+                float2 st = frac(uv * scale2) - float2(0.5, 0);  // 生成向下移动的竖条纹
+
+                // 计算水滴下落动画
+                float x = n3.x - 0.5;
+
+                // x 方向添加扭曲
+                float wiggle = sin(origUV.y * 20 + sin(origUV.y * 20));
+                x += wiggle * (0.5 - abs(x)) * (n3.z - 0.5);
+                x *= 0.7;  // 减小圆点半径，弱化裁剪
+
+                // y 方向添加随机速度
+                float y = pingPong(0.85, frac(t + n3.z));
+
+                float2 p = float2(x, y);  // 水滴中点位置
+                float d = length((st - p) * scale.yx);  // 生成向下移动的圆点
+
+                // 绘制水滴
+                float mainDrop = smoothstep(0.4, 0, d);
+
+                // 绘制拖尾
+                float r = sqrt(smoothstep(1, y, st.y));  // 绘制向下移动的渐变
+                float cd = abs(st.x - x);  // 绘制路径曲线
+
+                float trail = smoothstep(0.23 * r, 0.15 * r * r, cd);  // 绘制拖尾
+                float trailFront = smoothstep(-0.02, 0.02, st.y - y);
+                trail *= trailFront * r * r;  // 修正拖尾形状
+
+                // 绘制拖尾的小水滴
+                y = origUV.y;
+                y = frac(y * 10) + (st.y - 0.5);
+
+                float dd = length(st - float2(x, y));  // 生成断续圆点
+                float droplets = smoothstep(0.3, 0, dd) * r * trailFront;  // 绘制断续、明暗变化的水滴
+                float m = mainDrop + droplets;  // 水滴 + 拖尾水滴
+
+                return float2(m, trail);  // x：水滴，y：拖尾
+            }
+
+            // 绘制水滴
+            float2 drops(float2 uv, float t, float layer0, float layer1, float layer2)
+            {
+                float sd = staticDrops(uv, t) * layer0;  // 静态水滴
+                float2 dd0 = dynamicDrops(uv, t) * layer1;  // 动态水滴1
+                float2 dd1 = dynamicDrops(uv * 1.85, t) * layer2;  // 动态水滴2
+
+                float c = sd + dd0.x + dd1.x;
+                c = smoothstep(0.3, 1, c);  // 减少水滴数量
+
+                float trail = max(dd0.y, dd1.y);
+
+                return float2(c, trail);
+            }
+
+            fixed4 frag (v2f i) : SV_Target
+            {
+                // 在棋盘格长宽比为 1：1 的画布上进行绘制
+                float2 uv = i.uv;  // 传入 uv
+                uv.x *= _ScreenParams.x / _ScreenParams.y;  // 矫正
+
+                float t = _Time.x * _Speed;  // 时间
+
+                // 控制水滴数量的三个等级
+                float layer0 = smoothstep(0, 0.75, _RainMount);
+                float layer1 = smoothstep(0, 0.75, _RainMount);
+                float layer2 = smoothstep(0, 0.5, _RainMount);
+
+                float2 c = drops(uv, t, layer0, layer1, layer2);
+
+                // 水滴内 uv 偏移，产生凹凸效果
+                float2 e = float2(0.002, 0);
+                float cx = drops(uv + e, t, layer0, layer1, layer2).x;
+                float cy = drops(uv + e.yx, t, layer0, layer1, layer2).x;
+
+                float2 normal = float2(cx - c.x, cy - c.x);
+
+                // sample the texture
+                float focus = lerp(5, 0, c.y * _RainMount);
+                fixed4 col = tex2Dlod(_MainTex, float4(i.uv + normal, 0, focus));  // 使用 Lod 进行图像虚化
+                
+                return col;
+            }
+            ENDCG
+        }
+    }
+}
