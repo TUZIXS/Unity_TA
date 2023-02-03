@@ -1,0 +1,178 @@
+Shader "Custom/PhongWithCustomShadow"
+{
+    Properties
+    {
+        _MainTex ("Texture", 2D) = "white" {}
+        _Diffuse ("Diffuse", Color) = (0.5, 0.5, 0.5, 1)
+        _SpecularPower ("Specular Power", Range(0, 150)) = 20
+        _SpecularIntensity ("Specular Intensity", Range(0, 10)) = 1.5
+    }
+    SubShader
+    {
+        CGINCLUDE
+        float _specular(float3 viewDir, float3 lightDir, float3 normal, float power, float intensity)
+        {
+            float3 _viewDir = normalize(viewDir);
+            float3 _lightDir = normalize(lightDir);
+            float3 _normal = normalize(normal);
+
+            float3 halfVector = normalize(_lightDir + _viewDir);
+            float HdotN = max(0, dot(halfVector, _normal));
+            float specular = pow(HdotN, power) * intensity;
+
+            return specular;
+        }
+        ENDCG
+        
+        Tags { "RenderType"="Opaque" }
+        LOD 100
+
+        Pass
+        {
+            Tags { "LightMode"="ForwardBase" }  // 前向渲染，用于计算环境光、平行光、自发光
+
+            CGPROGRAM
+            #pragma vertex vert
+            #pragma fragment frag
+            #pragma multi_compile_fwdbase  // 编译指令，保证使用光照衰减等光照变量可以被正确赋值
+
+            #include "UnityCG.cginc"
+            #include "Lighting.cginc"
+            #include "AutoLight.cginc"  // 计算衰减所需头文件
+
+            struct appdata
+            {
+                float4 vertex : POSITION;
+                float2 uv : TEXCOORD0;
+                float3 normal : NORMAL;
+            };
+
+            struct v2f
+            {
+                float2 uv : TEXCOORD0;
+                float3 worldNormal : TEXCOORD1;
+                float3 worldPos : TEXCOORD2;
+                float4 vertex : SV_POSITION;
+            };
+
+            sampler2D _MainTex;
+            float4 _MainTex_ST;
+
+            float4 _Diffuse;
+            float _SpecularPower;
+            float _SpecularIntensity;
+
+            v2f vert (appdata v)
+            {
+                v2f o;
+                o.vertex = UnityObjectToClipPos(v.vertex);
+                o.uv = TRANSFORM_TEX(v.uv, _MainTex);
+                o.worldNormal = UnityObjectToWorldNormal(v.normal);
+                o.worldPos = mul(unity_ObjectToWorld, v.vertex).xyz;
+                return o;
+            }
+
+            fixed4 frag (v2f i) : SV_Target
+            {
+                // 高光
+                float3 lightDir = UnityWorldSpaceLightDir(i.worldPos);
+                float3 viewDir = UnityWorldSpaceViewDir(i.worldPos);
+                float3 specular = _LightColor0.rgb * _specular(viewDir, lightDir, i.worldNormal, _SpecularPower, _SpecularIntensity);
+
+                // 环境光
+                float3 ambient = UNITY_LIGHTMODEL_AMBIENT.xyz;
+
+                // 漫反射
+                float3 diffuse = _LightColor0.rgb * _Diffuse.rgb * max(0, dot(i.worldNormal, lightDir));
+
+                // 衰减
+                float atten = 1.0;
+                
+                float4 finalColor = 1;
+                finalColor.rgb = ambient + (diffuse + specular) * atten;
+                
+                return finalColor;
+            }
+            ENDCG
+        }
+
+        Pass
+        {
+            Tags { "LightMode"="ForwardAdd" }  // 前向渲染，用于计算额外的点光源
+            Blend One One  // 防止光照被覆盖
+
+            CGPROGRAM
+            #pragma vertex vert
+            #pragma fragment frag
+            #pragma multi_compile_fwdadd  // 编译指令，保证使用光照衰减等光照变量可以被正确赋值
+
+            #include "UnityCG.cginc"
+            #include "Lighting.cginc"
+            #include "AutoLight.cginc"  // 计算衰减所需头文件
+
+            struct appdata
+            {
+                float4 vertex : POSITION;
+                float2 uv : TEXCOORD0;
+                float3 normal : NORMAL;
+            };
+
+            struct v2f
+            {
+                float2 uv : TEXCOORD0;
+                float3 worldNormal : TEXCOORD1;
+                float3 worldPos : TEXCOORD2;
+                float4 vertex : SV_POSITION;
+            };
+
+            sampler2D _MainTex;
+            float4 _MainTex_ST;
+
+            float4 _Diffuse;
+            float _SpecularPower;
+            float _SpecularIntensity;
+
+            v2f vert (appdata v)
+            {
+                v2f o;
+                o.vertex = UnityObjectToClipPos(v.vertex);
+                o.uv = TRANSFORM_TEX(v.uv, _MainTex);
+                o.worldNormal = UnityObjectToWorldNormal(v.normal);
+                o.worldPos = mul(unity_ObjectToWorld, v.vertex).xyz;
+                return o;
+            }
+
+            fixed4 frag (v2f i) : SV_Target
+            {
+                // 高光
+                float3 lightDir = UnityWorldSpaceLightDir(i.worldPos);
+                float3 viewDir = UnityWorldSpaceViewDir(i.worldPos);
+                float3 specular = _LightColor0.rgb * _specular(viewDir, lightDir, i.worldNormal, _SpecularPower, _SpecularIntensity);
+
+                // 环境光
+                float3 ambient = UNITY_LIGHTMODEL_AMBIENT.xyz;
+
+                // 漫反射
+                float3 diffuse = _LightColor0.rgb * _Diffuse.rgb * max(0, dot(i.worldNormal, lightDir));
+
+                // 衰减
+                float atten = 1.0;
+                // ① 将顶点从世界空间变换到光源空间
+                float3 lightCoord = mul(unity_WorldToLight, float4(i.worldPos, 1)).xyz;
+                // ② 采样计算衰减值
+                // (0, 0) 表示与光源位置重合，(1, 1) 表示距离光源最远
+                // UNITY_ATTEN_CHANNEL 用来得到衰减纹理中衰减值所在的分量
+                atten = tex2D(_LightTexture0, dot(lightCoord, lightCoord).rr).UNITY_ATTEN_CHANNEL;
+                
+                float4 finalColor = 1;
+                finalColor.rgb = ambient + (diffuse + specular) * atten;
+                
+                return finalColor;
+            }
+            ENDCG
+        }
+
+        // 计算阴影
+        UsePass "Custom/ShadowMap/DirectionalShadow"
+    }
+}
