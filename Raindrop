@@ -1,4 +1,4 @@
-Shader "Custom/Chapter31_Raindrop"
+Shader "Custom/Raindrop"
 {
     Properties
     {
